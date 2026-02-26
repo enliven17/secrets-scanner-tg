@@ -32,15 +32,6 @@ bot.use((ctx, next) => {
     if (ctx.message && ctx.message.text && ctx.message.reply_to_message && ctx.message.reply_to_message.text) {
         let text = ctx.message.text;
         let replyTxt = ctx.message.reply_to_message.text;
-        if (replyTxt.includes('GitHub Personal Access Token:')) return sendCommand(ctx, '/settoken', text);
-        if (replyTxt.includes('commit history scan:')) return sendCommand(ctx, '/scancommits', text);
-        if (replyTxt.includes('format "user/repo":')) return sendCommand(ctx, '/scan', text);
-        if (replyTxt.includes('separated by a space:')) return sendCommand(ctx, '/search', text);
-        if (replyTxt.includes('global search:')) return sendCommand(ctx, '/searchglobal', text);
-        if (replyTxt.includes('check globally:')) return sendCommand(ctx, '/amiexposed', text);
-        if (replyTxt.includes('global EVM hunt')) return sendCommand(ctx, '/globalhunter', text);
-        if (replyTxt.includes('scan year')) return sendCommand(ctx, '/setyear', text);
-        if (replyTxt.includes('scan month')) return sendCommand(ctx, '/setmonth', text);
         if (replyTxt.includes('Personal Access Token:')) return sendCommand(ctx, '/settoken', text);
     }
     return next();
@@ -66,6 +57,7 @@ function getGithubToken(ctx) {
 }
 
 // Extract keys matching the extension
+// Extract secrets and private keys effectively, ignoring pure public addresses
 function extractPotentialKeys(text) {
     if (!text) return [];
     let keys = [];
@@ -73,25 +65,25 @@ function extractPotentialKeys(text) {
         if (!keys.some(k => k.type === type && k.value === val)) keys.push({ type, value: val });
     };
 
+    // Private Keys formats
     let evmPk = text.match(/\b([a-fA-F0-9]{64})\b/g);
     let evmPrefixPk = text.match(/\b(0x[a-fA-F0-9]{64})\b/g);
-    let evmAddr = text.match(/\b(0x[a-fA-F0-9]{40})\b/g);
     let solBase58 = text.match(/\b([1-9A-HJ-NP-Za-km-z]{87,88})\b/g);
     let solArray = text.match(/\[\s*\d+\s*(?:,\s*\d+\s*){63}\]/g);
-    let regexSolAddr = /(?:publicKey|walletAddress|address)['"\s:=]*([1-9A-HJ-NP-Za-km-z]{32,44})/gi;
-    let btcAddr = text.match(/\b(bc1[a-zA-HJ-NP-Z0-9]{39,59}|[13][a-km-zA-HJ-NP-Z1-9]{25,34})\b/g);
-    let suiAptosAddr = text.match(/\b(0x[a-fA-F0-9]{64})\b/g);
+
+    // Mnemonic / Seed phrases (usually 12-24 words) - basic check
+    let mnemonics = text.match(/\b(?:[a-z]{3,10}\s+){11,23}[a-z]{3,10}\b/gi);
 
     if (evmPk) evmPk.forEach(k => addUnique('EVM_PRIVATE_KEY', k));
     if (evmPrefixPk) evmPrefixPk.forEach(k => addUnique('EVM_PRIVATE_KEY', k.replace('0x', '')));
-    if (evmAddr) evmAddr.forEach(k => addUnique('EVM_ADDRESS', k));
     if (solBase58) solBase58.forEach(k => addUnique('SOL_PRIVATE_KEY', k));
     if (solArray) solArray.forEach(k => addUnique('SOL_PRIVATE_KEY_ARRAY', k));
-    if (btcAddr) btcAddr.forEach(k => addUnique('BTC_ADDRESS', k));
-    if (suiAptosAddr) suiAptosAddr.forEach(k => addUnique('SUI_APTOS_ADDRESS', k));
+    if (mnemonics) mnemonics.forEach(k => addUnique('MNEMONIC', k));
 
-    let m;
-    while ((m = regexSolAddr.exec(text)) !== null) addUnique('SOL_ADDRESS', m[1]);
+    // Special case for Sui/Aptos: in most repos 64 char hex is usually a key rather than addr
+    let suiAptosPotential = text.match(/\b(0x[a-fA-F0-9]{64})\b/g);
+    if (suiAptosPotential) suiAptosPotential.forEach(k => addUnique('EVM_PRIVATE_KEY', k.replace('0x', '')));
+
     return keys;
 }
 
@@ -311,18 +303,15 @@ function getMenuConfig(userId) {
     };
 }
 
-async function refreshMenu(ctx) {
+async function refreshMenu(ctx, customConfig = null) {
     const userId = ctx.from.id;
-    if (!userStore[userId]) userStore[userId] = {};
-    const config = getMenuConfig(userId);
-    const user = userStore[userId];
+    const config = customConfig || getMenuConfig(userId);
+    const user = userStore[userId] || {};
 
     try {
         if (ctx.callbackQuery && ctx.callbackQuery.message.message_id === user.lastMenuId) {
-            // Edit existing
             await ctx.editMessageText(config.text, { parse_mode: 'HTML', ...config.extra });
         } else if (user.lastMenuId) {
-            // Try edit stored ID
             try {
                 await ctx.telegram.editMessageText(ctx.chat.id, user.lastMenuId, null, config.text, { parse_mode: 'HTML', ...config.extra });
             } catch (e) {
@@ -428,12 +417,56 @@ bot.action('action_toggle_examples', async (ctx) => {
 
 bot.action('action_change_year', async (ctx) => {
     await ctx.answerCbQuery();
-    ctx.reply('Set commit scan year (e.g., 2024, 2023) or type "any" to clear:', Markup.forceReply());
+    const config = {
+        text: '<b>[ SELECT SCAN YEAR ]</b>\nChoose a year or clear the filter:',
+        extra: Markup.inlineKeyboard([
+            [Markup.button.callback('2026', 'set_year_2026'), Markup.button.callback('2025', 'set_year_2025')],
+            [Markup.button.callback('2024', 'set_year_2024'), Markup.button.callback('2023', 'set_year_2023')],
+            [Markup.button.callback('2022', 'set_year_2022'), Markup.button.callback('Clear (Any)', 'set_year_any')],
+            [Markup.button.callback('« CANCEL', 'action_back_main')]
+        ])
+    };
+    return refreshMenu(ctx, config);
 });
 
 bot.action('action_change_month', async (ctx) => {
     await ctx.answerCbQuery();
-    ctx.reply('Set commit scan month (01 to 12) or type "all" to clear:', Markup.forceReply());
+    const config = {
+        text: '<b>[ SELECT SCAN MONTH ]</b>\nChoose a month or clear the filter:',
+        extra: Markup.inlineKeyboard([
+            [Markup.button.callback('01', 'set_month_01'), Markup.button.callback('02', 'set_month_02'), Markup.button.callback('03', 'set_month_03')],
+            [Markup.button.callback('04', 'set_month_04'), Markup.button.callback('05', 'set_month_05'), Markup.button.callback('06', 'set_month_06')],
+            [Markup.button.callback('07', 'set_month_07'), Markup.button.callback('08', 'set_month_08'), Markup.button.callback('09', 'set_month_09')],
+            [Markup.button.callback('10', 'set_month_10'), Markup.button.callback('11', 'set_month_11'), Markup.button.callback('12', 'set_month_12')],
+            [Markup.button.callback('Clear (All)', 'set_month_all'), Markup.button.callback('« CANCEL', 'action_back_main')]
+        ])
+    };
+    return refreshMenu(ctx, config);
+});
+
+bot.action(/set_year_(.+)/, async (ctx) => {
+    await ctx.answerCbQuery();
+    const val = ctx.match[1];
+    const userId = ctx.from.id;
+    if (!userStore[userId]) userStore[userId] = {};
+    userStore[userId].selectedYear = val === 'any' ? null : val;
+    saveUserStore();
+    return refreshMenu(ctx);
+});
+
+bot.action(/set_month_(.+)/, async (ctx) => {
+    await ctx.answerCbQuery();
+    const val = ctx.match[1];
+    const userId = ctx.from.id;
+    if (!userStore[userId]) userStore[userId] = {};
+    userStore[userId].selectedMonth = val === 'all' ? null : val;
+    saveUserStore();
+    return refreshMenu(ctx);
+});
+
+bot.action('action_back_main', async (ctx) => {
+    await ctx.answerCbQuery();
+    return refreshMenu(ctx);
 });
 
 bot.action('action_config', async (ctx) => {
@@ -488,11 +521,13 @@ bot.command('setyear', (ctx) => {
     if (!userStore[userId]) userStore[userId] = {};
     if (!val || val.toLowerCase() === 'any') {
         userStore[userId].selectedYear = null;
+        ctx.reply('[SUCCESS] Commit year filter cleared.');
     } else {
         userStore[userId].selectedYear = val;
+        ctx.reply(`[SUCCESS] Commit year filter set to: ${val}`);
     }
     saveUserStore();
-    return refreshMenu(ctx);
+    return refreshMenu(ctx, 'filters');
 });
 
 bot.command('setmonth', (ctx) => {
@@ -501,11 +536,13 @@ bot.command('setmonth', (ctx) => {
     if (!userStore[userId]) userStore[userId] = {};
     if (!val || val.toLowerCase() === 'all') {
         userStore[userId].selectedMonth = null;
+        ctx.reply('[SUCCESS] Commit month filter cleared.');
     } else {
         userStore[userId].selectedMonth = val.padStart(2, '0');
+        ctx.reply(`[SUCCESS] Commit month filter set to: ${userStore[userId].selectedMonth}`);
     }
     saveUserStore();
-    return refreshMenu(ctx);
+    return refreshMenu(ctx, 'filters');
 });
 
 // Auto-detect tokens pasted directly into the chat without /settoken command and without replying 
@@ -538,7 +575,15 @@ bot.command('scan', async (ctx) => {
     let token;
     try { token = getGithubToken(ctx); } catch (e) { return ctx.reply(e.message); }
 
-    ctx.reply(`[INFO] Initializing scan sequence for ${target.type}: ${target.name}
+    const userId = ctx.from.id;
+    const user = userStore[userId] || {};
+    const filtersLabel = `
+- Env Only: ${user.onlyEnvFiles ? 'ON' : 'OFF'}
+- No Examples: ${!(user.excludeExamples === false) ? 'ON' : 'OFF'}`;
+
+    ctx.reply(`[INFO] Initializing scan sequence for ${target.name}
+Scope: ${target.type === 'user' ? 'Geniş (User)' : 'Dar (Repo)'}
+Filters Active: ${filtersLabel}
 Status: Processing...`);
 
     let searchScope = target.type === 'user' ? `user:${target.name}` : `repo:${target.name}`;
@@ -553,11 +598,10 @@ Status: Processing...`);
         `"_KEY=" ${searchScope}`, `"_SECRET=" ${searchScope}`, `filename:wallet.dat ${searchScope}`,
         `filename:keystore ${searchScope}`, `"mnemonic" ${searchScope}`, `"seed phrase" ${searchScope}`,
         `"xprv" ${searchScope}`, `"ETH_PRIVATE_KEY=" ${searchScope}`, `"SOLANA_PRIVATE_KEY=" ${searchScope}`,
-        `"0x" ${searchScope}`, `"bc1" ${searchScope}`, `"ALCHEMY_API_KEY=" ${searchScope}`
+        `"ALCHEMY_API_KEY=" ${searchScope}`
     ];
 
-    const userId = ctx.from.id;
-    if (userStore[userId] && userStore[userId].onlyEnvFiles) {
+    if (user.onlyEnvFiles) {
         queries = queries.map(q => {
             if (!q.includes('filename:')) return `${q} filename:.env`;
             return null;
@@ -620,16 +664,21 @@ bot.command('scancommits', async (ctx) => {
     try { token = getGithubToken(ctx); } catch (e) { return ctx.reply(e.message); }
 
     const userId = ctx.from.id;
-    const year = userStore[userId] ? userStore[userId].selectedYear : null;
-    const month = userStore[userId] ? userStore[userId].selectedMonth : null;
+    const user = userStore[userId] || {};
+    const year = user.selectedYear || null;
+    const month = user.selectedMonth || null;
+    const filtersLabel = `
+- Env Only: ${user.onlyEnvFiles ? 'ON' : 'OFF'}
+- Year: ${year || 'Any'}
+- Month: ${month || 'All'}`;
 
-    ctx.reply(`[INFO] Fetching commit history data for ${target.name}
-Filter: ${year || 'Any Year'} / ${month || 'Any Month'}
+    ctx.reply(`[INFO] Fetching commit data for ${target.name}
+Filters Active: ${filtersLabel}
 Status: Communicating with GitHub API...`);
 
     try {
         let commits = await fetchRepoCommits(target.name, token, year, month);
-        if (!commits || commits.length === 0) return ctx.reply('No commits found.');
+        if (!commits || commits.length === 0) return ctx.reply(`[INFO] No commits found for ${year}/${month}.`);
 
         let suspiciousFiles = ['.env', 'id_rsa', 'id_ed25519', 'credentials', 'wp-config.php', 'database.yml', 'wallet.dat', 'keystore'];
         let secretRegexes = [
@@ -643,9 +692,9 @@ Status: Communicating with GitHub API...`);
             /PRIVATE_KEY\s*=\s*['"]?[a-zA-Z0-9]{32,}['"]?/,
             /SECRET_KEY\s*=\s*['"]?[a-zA-Z0-9]{32,}['"]?/,
             /[A-Z0-9_]+_KEY\s*=\s*['"]?[a-zA-Z0-9\-\_]{16,}['"]?/,
-            /0x[a-fA-F0-9]{40}/,
-            /bc1[a-zA-HJ-NP-Z0-9]{39,59}/,
-            /(publicKey|wallet|address|pubKey)['"\s]*[:=]['"\s]*[1-9A-HJ-NP-Za-km-z]{32,44}['"]?/i
+            /[a-fA-F0-9]{64}/,
+            /[1-9A-HJ-NP-Za-km-z]{87,88}/,
+            /mnemonic|seed phrase/i
         ];
 
         let foundItems = [];
@@ -920,7 +969,7 @@ bot.action(/bal_(.+)/, async (ctx) => {
     for (let k of keys) {
         try {
             if (k.type.includes('EVM')) {
-                let addr = k.type === 'EVM_ADDRESS' ? k.value : getEvmAddressFromKey(k.value);
+                let addr = getEvmAddressFromKey(k.value);
                 if (addr) {
                     let { balances, emptyCount } = await getEvmBalance(addr);
                     totalEmptyChains += emptyCount;
@@ -930,31 +979,19 @@ bot.action(/bal_(.+)/, async (ctx) => {
                     }
                 }
             } else if (k.type.includes('SOL')) {
-                let addr = k.type === 'SOL_ADDRESS' ? k.value : getSolAddressFromKey(k.value);
+                let addr = getSolAddressFromKey(k.value);
                 if (addr) {
                     let bal = await getSolBalance(addr);
                     if (bal) {
                         foundAssets = true;
                         resultsHtml += `[SOL] ${addr.substring(0, 8)}... : ${bal}\n`;
-                    } else { totalEmptyChains++; }
+                    } else { totalEmptyChains += 1; }
                 }
-            } else if (k.type === 'BTC_ADDRESS') {
-                let bal = await getBtcBalance(k.value);
-                if (bal) {
-                    foundAssets = true;
-                    resultsHtml += `[BTC] ${k.value.substring(0, 8)}... : ${bal}\n`;
-                } else { totalEmptyChains++; }
-            } else if (k.type === 'SUI_APTOS_ADDRESS') {
-                let suiBal = await getSuiBalance(k.value);
-                let aptosBal = await getAptosBalance(k.value);
-                if (suiBal) { foundAssets = true; resultsHtml += `[SUI] ${k.value.substring(0, 8)}... : ${suiBal}\n`; } else { totalEmptyChains++; }
-                if (aptosBal) { foundAssets = true; resultsHtml += `[APT] ${k.value.substring(0, 8)}... : ${aptosBal}\n`; } else { totalEmptyChains++; }
-            } else if (k.type === 'DOGE_ADDRESS') {
-                let bal = await getDogeBalance(k.value);
-                if (bal) { foundAssets = true; resultsHtml += `[DOGE] ${k.value.substring(0, 8)}... : ${bal}\n`; } else { totalEmptyChains++; }
-            } else if (k.type === 'TRON_ADDRESS') {
-                let bal = await getTronBalance(k.value);
-                if (bal) { foundAssets = true; resultsHtml += `[TRON] ${k.value.substring(0, 8)}... : ${bal}\n`; } else { totalEmptyChains++; }
+            } else if (k.type === 'MNEMONIC') {
+                // For mnemonics, we can't easily check all chains without a library that handles bip39, 
+                // but we can at least flag it as found.
+                resultsHtml += `[MNEMONIC] Found potential seed phrase!\n`;
+                foundAssets = true;
             }
         } catch (e) {
             console.error(e);
